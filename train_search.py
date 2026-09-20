@@ -60,7 +60,7 @@ def main():
     batch_size = 16
 
     train_loader, arch_val_loader, test_loader, classes = get_neu_cls_loaders(
-        'data/NEU-DET', batch_size=batch_size
+        'data/NEU-CLS-final', batch_size=batch_size
     )
     print('Classes:', classes)
 
