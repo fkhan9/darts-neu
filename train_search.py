@@ -1,4 +1,6 @@
 import sys
+
+import architect
 sys.path.insert(0, 'src')
 
 import torch
@@ -88,7 +90,8 @@ def main():
                 x_val, y_val = next(arch_val_iter)
             x_val, y_val = x_val.to(device), y_val.to(device)
 
-            a_loss = architect.step(x_val, y_val, criterion)
+            eta = w_optimizer.param_groups[0]['lr']
+            a_loss = architect.step(x_train, y_train, x_val, y_val, eta, w_optimizer, criterion)
 
             w_optimizer.zero_grad()
             logits = model(x_train)

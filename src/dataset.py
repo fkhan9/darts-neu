@@ -1,9 +1,9 @@
 """
 NEU-CLS dataset loading for DARTS search.
 
-Expected folder structure (standard Kaggle NEU-CLS mirror):
-    data/NEU-CLS/train/images/<class_name>/*.jpg
-    data/NEU-CLS/validation/images/<class_name>/*.jpg
+Expected folder structure (correctly-sourced NEU-CLS classification release):
+    data/NEU-CLS-final/train/images/<class_name>/*.bmp
+    data/NEU-CLS-final/validation/images/<class_name>/*.bmp
 
 We only use the images/ subfolders -- the annotations/ folders (XML
 bounding boxes) are for the detection variant of this dataset and are
@@ -16,6 +16,11 @@ convention). Rather than changing the stem, we convert grayscale ->
 (num_output_channels=3). This keeps model_search.py unchanged and is
 the standard, low-risk fix for adapting a CIFAR-style stem to
 single-channel domains.
+
+Images are resized to 96x96 (from native 200x200) to keep the search
+computationally tractable on limited GPU memory (laptop OOM, Colab
+free-tier T4). This is a deliberate resolution/compute tradeoff, not
+an oversight -- document it as such in the methodology chapter.
 """
 
 import torch
@@ -23,13 +28,21 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, random_split
 
 
-NEU_MEAN = [0.5, 0.5, 0.5]   # placeholder; replace with computed dataset stats if time allows
-NEU_STD = [0.5, 0.5, 0.5]
+# Real computed NEU-CLS statistics (grayscale, replicated across 3 channels).
+# Recompute these against NEU-CLS-final specifically before the real
+# ablation runs -- these were computed against the earlier NEU-DET-mirror
+# data and are a reasonable placeholder, not yet re-verified on the
+# corrected dataset.
+NEU_MEAN = [0.5049790143966675] * 3
+NEU_STD = [0.16344384849071503] * 3
+
+IMG_SIZE = 96
 
 
 def get_transforms():
     train_transform = transforms.Compose([
         transforms.Grayscale(num_output_channels=3),
+        transforms.Resize((IMG_SIZE, IMG_SIZE)),
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),   # defects have no canonical "up" on a rolled strip
         transforms.ToTensor(),
@@ -38,6 +51,7 @@ def get_transforms():
 
     eval_transform = transforms.Compose([
         transforms.Grayscale(num_output_channels=3),
+        transforms.Resize((IMG_SIZE, IMG_SIZE)),
         transforms.ToTensor(),
         transforms.Normalize(NEU_MEAN, NEU_STD),
     ])
@@ -47,9 +61,9 @@ def get_transforms():
 
 def get_neu_cls_loaders(data_root, batch_size=32, val_split_for_arch=0.5, num_workers=0):
     """
-    data_root: path to the NEU-CLS folder, e.g. 'data/NEU-CLS'
-               (expects data_root/train/images/<class>/*.jpg and
-                data_root/validation/images/<class>/*.jpg)
+    data_root: path to the NEU-CLS folder, e.g. 'data/NEU-CLS-final'
+               (expects data_root/train/images/<class>/*.bmp and
+                data_root/validation/images/<class>/*.bmp)
 
     DARTS's bilevel search needs its OWN train/val split (separate from
     any final-evaluation test set). So we split the dataset's train/
