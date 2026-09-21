@@ -28,13 +28,11 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, random_split
 
 
-# Real computed NEU-CLS statistics (grayscale, replicated across 3 channels).
-# Recompute these against NEU-CLS-final specifically before the real
-# ablation runs -- these were computed against the earlier NEU-DET-mirror
-# data and are a reasonable placeholder, not yet re-verified on the
-# corrected dataset.
-NEU_MEAN = [0.5049790143966675] * 3
-NEU_STD = [0.16344384849071503] * 3
+# Real computed NEU-CLS statistics (grayscale, replicated across 3 channels),
+# computed directly against the corrected NEU-CLS-final/train data at 96x96
+# resolution -- not an inherited approximation from the earlier dataset version.
+NEU_MEAN = [0.5001364946365356] * 3
+NEU_STD = [0.16627439856529236] * 3
 
 IMG_SIZE = 96
 
