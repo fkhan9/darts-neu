@@ -53,8 +53,8 @@ def evaluate(model, loader, device):
 
 
 def main():
-    
-    torch.model_seed(42)
+
+    torch.manual_seed(42)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
