@@ -53,6 +53,9 @@ def evaluate(model, loader, device):
 
 
 def main():
+    
+    torch.model_seed(42)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
 
@@ -118,6 +121,10 @@ def main():
 
     test_acc = evaluate(model, test_loader, device)
     print(f'Final held-out test accuracy: {test_acc:.4f}')
+
+    with open('genotype.txt', 'w') as f:
+        print(model.genotype(), file=f)
+    print('Saved discovered architecture to genotype.txt')
 
     plot_curves(history)
 
