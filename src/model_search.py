@@ -1,7 +1,10 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from cell import Cell
+from operations import PRIMITIVES
+from genotypes import Genotype
 
 
 class Network(nn.Module):
@@ -28,7 +31,7 @@ class Network(nn.Module):
                 reduction = True
             else:
                 reduction = False
-            cell = Cell(steps,self.multiplier, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
+            cell = Cell(steps, self.multiplier, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
             reduction_prev = reduction
             self.cells.append(cell)
             C_prev_prev, C_prev = C_prev, multiplier * C_curr
@@ -47,6 +50,45 @@ class Network(nn.Module):
     def arch_parameters(self):
         return [self.alphas_normal, self.alphas_reduce]
 
+    def genotype(self):
+        """
+        Discretizes the current alpha weights into a fixed Genotype, following
+        the standard DARTS parsing rule: for each intermediate node, keep the
+        top-2 incoming edges (ranked by their best non-'none' operation weight),
+        then select the argmax operation (excluding 'none') on each kept edge.
+        """
+        def _parse(weights):
+            gene = []
+            n = 2
+            start = 0
+            none_index = PRIMITIVES.index('none')
+            for i in range(self.steps):
+                end = start + n
+                W = weights[start:end].copy()
+                edges = sorted(
+                    range(n),
+                    key=lambda x: -max(W[x][k] for k in range(len(W[x])) if k != none_index)
+                )[:2]
+                for j in edges:
+                    k_best = None
+                    for k in range(len(W[j])):
+                        if k != none_index:
+                            if k_best is None or W[j][k] > W[j][k_best]:
+                                k_best = k
+                    gene.append((PRIMITIVES[k_best], j))
+                start = end
+                n += 1
+            return gene
+
+        gene_normal = _parse(F.softmax(self.alphas_normal, dim=-1).data.cpu().numpy())
+        gene_reduce = _parse(F.softmax(self.alphas_reduce, dim=-1).data.cpu().numpy())
+
+        concat = range(2 + self.steps - self.multiplier, self.steps + 2)
+        genotype = Genotype(
+            normal=gene_normal, normal_concat=concat,
+            reduce=gene_reduce, reduce_concat=concat,
+        )
+        return genotype
 
     def forward(self, x):
         s0 = s1 = self.stem(x)
