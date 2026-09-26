@@ -16,7 +16,7 @@ import sys
 sys.path.insert(0, 'src')
 
 import argparse
-import ast
+import time
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -39,6 +39,16 @@ def evaluate(model, loader, device):
             total += y.size(0)
     model.train()
     return correct / total
+
+
+def format_duration(seconds):
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h >= 1:
+        return f'{int(h)}h {int(m)}m {s:.1f}s'
+    if m >= 1:
+        return f'{int(m)}m {s:.1f}s'
+    return f'{s:.1f}s'
 
 
 def main():
@@ -82,7 +92,11 @@ def main():
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=3e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
+    run_start = time.time()
+
     for epoch in range(args.epochs):
+        epoch_start = time.time()
+
         epoch_loss, n_batches = 0.0, 0
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
@@ -96,11 +110,22 @@ def main():
         scheduler.step()
 
         train_acc = evaluate(model, train_loader, device)
-        print(f'Epoch {epoch + 1}/{args.epochs} | loss: {epoch_loss / n_batches:.4f} | train_acc: {train_acc:.4f}')
+
+        epoch_time = time.time() - epoch_start
+        elapsed = time.time() - run_start
+
+        print(f'Epoch {epoch + 1}/{args.epochs} | loss: {epoch_loss / n_batches:.4f} | '
+              f'train_acc: {train_acc:.4f} | '
+              f'epoch_time: {format_duration(epoch_time)} | elapsed: {format_duration(elapsed)}')
 
     test_acc = evaluate(model, test_loader, device)
+    total_time = time.time() - run_start
+    avg_epoch_time = total_time / args.epochs
+
     print(f'\nFinal discretized-architecture, held-out test accuracy: {test_acc:.4f}')
     print(f'(compare against supernet accuracy from train_search.py -- these are not the same measurement)')
+    print(f'Total retrain time: {format_duration(total_time)} '
+          f'(avg {format_duration(avg_epoch_time)}/epoch over {args.epochs} epochs)')
 
     torch.save(model.state_dict(), 'checkpoints/final_model.pt')
     print('Saved final model to checkpoints/final_model.pt')
