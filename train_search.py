@@ -68,9 +68,9 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
 
-    C = 8
-    layers = 4
-    epochs = 5
+    C = 16
+    layers = 8
+    epochs = 25
     batch_size = 16
 
     train_loader, arch_val_loader, test_loader, classes = get_neu_cls_loaders(
