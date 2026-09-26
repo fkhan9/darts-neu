@@ -1,8 +1,7 @@
 import sys
-
-import architect
 sys.path.insert(0, 'src')
 
+import time
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
@@ -52,6 +51,16 @@ def evaluate(model, loader, device):
     return correct / total
 
 
+def format_duration(seconds):
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h >= 1:
+        return f'{int(h)}h {int(m)}m {s:.1f}s'
+    if m >= 1:
+        return f'{int(m)}m {s:.1f}s'
+    return f'{s:.1f}s'
+
+
 def main():
 
     torch.manual_seed(42)
@@ -77,7 +86,11 @@ def main():
 
     history = {'w_loss': [], 'a_loss': [], 'train_acc': [], 'val_acc': []}
 
+    run_start = time.time()
+
     for epoch in range(epochs):
+        epoch_start = time.time()
+
         arch_val_iter = iter(arch_val_loader)
         epoch_w_loss = 0.0
         epoch_a_loss = 0.0
@@ -109,10 +122,15 @@ def main():
         train_acc = evaluate(model, train_loader, device)
         val_acc = evaluate(model, arch_val_loader, device)
 
+        epoch_time = time.time() - epoch_start
+        elapsed = time.time() - run_start
+
         print(f'Epoch {epoch+1}/{epochs} | '
               f'w_loss: {epoch_w_loss/n_batches:.4f} | '
               f'a_loss: {epoch_a_loss/n_batches:.4f} | '
-              f'train_acc: {train_acc:.4f} | val_acc: {val_acc:.4f}')
+              f'train_acc: {train_acc:.4f} | val_acc: {val_acc:.4f} | '
+              f'epoch_time: {format_duration(epoch_time)} | '
+              f'elapsed: {format_duration(elapsed)}')
 
         history['w_loss'].append(epoch_w_loss / n_batches)
         history['a_loss'].append(epoch_a_loss / n_batches)
@@ -120,7 +138,12 @@ def main():
         history['val_acc'].append(val_acc)
 
     test_acc = evaluate(model, test_loader, device)
+    total_time = time.time() - run_start
+    avg_epoch_time = total_time / epochs
+
     print(f'Final held-out test accuracy: {test_acc:.4f}')
+    print(f'Total search time: {format_duration(total_time)} '
+          f'(avg {format_duration(avg_epoch_time)}/epoch over {epochs} epochs)')
 
     with open('genotype.txt', 'w') as f:
         print(model.genotype(), file=f)
