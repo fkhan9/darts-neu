@@ -19,12 +19,36 @@ import argparse
 import time
 import torch
 import torch.nn as nn
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 
 from model_final import NetworkFinal
 from genotypes import Genotype
 from dataset import get_neu_cls_loaders, get_transforms
 from torchvision import datasets
+
+
+def plot_final_curves(history, out_path='checkpoints/final_retrain_curves.png'):
+    epochs = range(1, len(history['loss']) + 1)
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+
+    axes[0].plot(epochs, history['loss'], label='training loss', marker='o')
+    axes[0].set_xlabel('Epoch')
+    axes[0].set_ylabel('Loss')
+    axes[0].set_title('Final Retrain: Loss Curve')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(epochs, history['train_acc'], label='train accuracy', marker='o')
+    axes[1].set_xlabel('Epoch')
+    axes[1].set_ylabel('Accuracy')
+    axes[1].set_title('Final Retrain: Accuracy Curve')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    print(f'Saved final retrain curves to {out_path}')
 
 
 def evaluate(model, loader, device):
@@ -93,6 +117,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     run_start = time.time()
+    history = {'loss': [], 'train_acc': []}
 
     for epoch in range(args.epochs):
         epoch_start = time.time()
@@ -118,6 +143,9 @@ def main():
               f'train_acc: {train_acc:.4f} | '
               f'epoch_time: {format_duration(epoch_time)} | elapsed: {format_duration(elapsed)}')
 
+        history['loss'].append(epoch_loss / n_batches)
+        history['train_acc'].append(train_acc)
+
     test_acc = evaluate(model, test_loader, device)
     total_time = time.time() - run_start
     avg_epoch_time = total_time / args.epochs
@@ -126,6 +154,8 @@ def main():
     print(f'(compare against supernet accuracy from train_search.py -- these are not the same measurement)')
     print(f'Total retrain time: {format_duration(total_time)} '
           f'(avg {format_duration(avg_epoch_time)}/epoch over {args.epochs} epochs)')
+
+    plot_final_curves(history)
 
     torch.save(model.state_dict(), 'checkpoints/final_model.pt')
     print('Saved final model to checkpoints/final_model.pt')
