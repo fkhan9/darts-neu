@@ -50,6 +50,13 @@ class Network(nn.Module):
     def arch_parameters(self):
         return [self.alphas_normal, self.alphas_reduce]
 
+    def weight_named_parameters(self):
+        """All trainable parameters except the architecture parameters (alphas)."""
+        return [(n, p) for n, p in self.named_parameters() if not n.startswith('alphas_')]
+
+    def weight_parameters(self):
+        return [p for _, p in self.weight_named_parameters()]
+
     def genotype(self):
         """
         Discretizes the current alpha weights into a fixed Genotype, following

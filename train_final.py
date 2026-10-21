@@ -1,68 +1,40 @@
 """
 Discretize the search result into a fixed architecture, retrain it from
-scratch (no bilevel split -- just ordinary supervised training on the full
-training set), and evaluate on the genuinely held-out test set.
+scratch (no bilevel split, just ordinary supervised training on the full
+training set) and evaluate on the held-out test set.
 
 Usage:
-    python train_final.py                      # runs a fresh search first, then retrains
-    python train_final.py --genotype_file g.txt # retrains from an already-saved genotype
+    python train_final.py --name seed1                       # retrains runs/seed1/search/genotype.txt
+    python train_final.py --name other --genotype_file path/to/genotype.txt
+Settings come from configs/default.yaml (retrain section); override with --set.
 
-Save a genotype from a completed search with:
-    print(model.genotype(), file=open('genotype.txt', 'w'))
-in train_search.py, right after the search loop finishes.
+The last-epoch model is evaluated; nothing is selected on the test set.
 """
 
 import sys
 sys.path.insert(0, 'src')
 
 import argparse
+import csv
+import json
+import os
+import shutil
 import time
+
+import numpy as np
 import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader
 
 from model_final import NetworkFinal
 from genotypes import Genotype
-from dataset import get_neu_cls_loaders, get_transforms
-from torchvision import datasets
-
-
-def plot_final_curves(history, out_path='checkpoints/final_retrain_curves.png'):
-    epochs = range(1, len(history['loss']) + 1)
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-
-    axes[0].plot(epochs, history['loss'], label='training loss', marker='o')
-    axes[0].set_xlabel('Epoch')
-    axes[0].set_ylabel('Loss')
-    axes[0].set_title('Final Retrain: Loss Curve')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].plot(epochs, history['train_acc'], label='train accuracy', marker='o')
-    axes[1].set_xlabel('Epoch')
-    axes[1].set_ylabel('Accuracy')
-    axes[1].set_title('Final Retrain: Accuracy Curve')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
-    print(f'Saved final retrain curves to {out_path}')
-
-
-def evaluate(model, loader, device):
-    model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for x, y in loader:
-            x, y = x.to(device), y.to(device)
-            logits = model(x)
-            preds = logits.argmax(dim=1)
-            correct += (preds == y).sum().item()
-            total += y.size(0)
-    model.train()
-    return correct / total
+from dataset import get_retrain_loaders, IMG_SIZE
+from config import load_config, save_snapshot
+from runtime import (set_seed, phase_dir, get_rng_state, set_rng_state,
+                     save_atomic, write_json, rewrite_jsonl)
+from evalutil import predict
+from metrics import classification_report, softmax
+from arch_stats import genotype_to_dict, cell_stats
+from plotting import plot_retrain
 
 
 def format_duration(seconds):
@@ -75,90 +47,157 @@ def format_duration(seconds):
     return f'{s:.1f}s'
 
 
+def count_flops(model, device):
+    """Forward FLOPs for one 96x96 image (torch FlopCounterMode: counts convolutions and linear layers)."""
+    try:
+        from torch.utils.flop_counter import FlopCounterMode
+        model.eval()
+        x = torch.zeros(1, 3, IMG_SIZE, IMG_SIZE, device=device)
+        with torch.no_grad(), FlopCounterMode(display=False) as fc:
+            model(x)
+        model.train()
+        return int(fc.get_total_flops())
+    except Exception as e:  # keep the run going; the field is just empty
+        print('FLOP counting failed:', e)
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--genotype_file', type=str, default='genotype.txt',
-                         help='Path to a saved genotype (from model.genotype(), printed to a text file)')
-    parser.add_argument('--data_root', type=str, default='data/NEU-CLS-final')
-    parser.add_argument('--C', type=int, default=16,
-                         help='Channels for the final model. Can be larger than the search-phase C, '
-                              'since a fixed architecture is far cheaper in memory than a supernet.')
-    parser.add_argument('--layers', type=int, default=8)
-    parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=16)
-    parser.add_argument('--lr', type=float, default=0.025)
-    args = parser.parse_args()
+    parser.add_argument('--config', default='configs/default.yaml')
+    parser.add_argument('--name', required=True, help='run folder: <out_root>/<name>/retrain/')
+    parser.add_argument('--genotype_file', default=None,
+                        help='default: <out_root>/<name>/search/genotype.txt')
+    parser.add_argument('--seed', type=int, default=None, help='overrides run.seed')
+    parser.add_argument('--set', action='append', default=[], metavar='KEY=VALUE',
+                        help='override any config key, e.g. --set retrain.epochs=30 (repeatable)')
+    cli = parser.parse_args()
 
+    overrides = list(cli.set)
+    if cli.seed is not None:
+        overrides.append(f'run.seed={cli.seed}')
+    cfg = load_config(cli.config, overrides)
+
+    out_dir = phase_dir(cfg, cli.name, 'retrain')
+    save_snapshot(cfg, out_dir)
+    print(f'Run folder: {out_dir}')
+
+    metrics_path = os.path.join(out_dir, 'metrics.json')
+    if os.path.exists(metrics_path):
+        print('This retrain has already finished (metrics.json exists). Nothing to do.')
+        return
+
+    set_seed(cfg.run.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
 
-    with open(args.genotype_file, 'r') as f:
+    geno_file = cli.genotype_file or os.path.join(cfg.run.out_root, cli.name, 'search', 'genotype.txt')
+    with open(geno_file, 'r') as f:
         genotype_str = f.read().strip()
-    genotype = eval(genotype_str, {'Genotype': Genotype})
+    genotype = eval(genotype_str, {'Genotype': Genotype, 'range': range})
+    shutil.copyfile(geno_file, os.path.join(out_dir, 'genotype_used.txt'))
     print('Loaded genotype:', genotype)
 
-    # Full training set (no bilevel split needed here -- this is ordinary
-    # supervised training of one fixed architecture, not a search).
-    train_transform, eval_transform = get_transforms()
-    train_set = datasets.ImageFolder(root=f'{args.data_root}/train/images', transform=train_transform)
-    test_set = datasets.ImageFolder(root=f'{args.data_root}/validation/images', transform=eval_transform)
-    classes = train_set.classes
+    train_loader, test_loader, classes, test_set, data_info = get_retrain_loaders(
+        cfg.data.root, batch_size=cfg.retrain.batch_size, num_workers=cfg.data.num_workers)
     print('Classes:', classes)
+    print('Class counts:', data_info)
 
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=0)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
-
-    model = NetworkFinal(C=args.C, num_classes=len(classes), layers=args.layers, genotype=genotype).to(device)
+    model = NetworkFinal(C=cfg.retrain.C, num_classes=len(classes),
+                         layers=cfg.retrain.layers, genotype=genotype).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f'Final model parameters: {n_params:,}')
+    flops = count_flops(model, device)
+    print(f'Final model parameters: {n_params:,} | forward FLOPs per image: {flops}')
 
+    epochs = cfg.retrain.epochs
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=3e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    optimizer = torch.optim.SGD(model.parameters(), lr=cfg.retrain.lr, momentum=cfg.retrain.momentum,
+                                weight_decay=cfg.retrain.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-    run_start = time.time()
-    history = {'loss': [], 'train_acc': []}
+    rows, start_epoch = [], 0
+    ckpt_path = os.path.join(out_dir, 'ckpt_last.pt')
+    if os.path.exists(ckpt_path):
+        ck = torch.load(ckpt_path, map_location=device, weights_only=False)
+        model.load_state_dict(ck['model'])
+        optimizer.load_state_dict(ck['opt'])
+        scheduler.load_state_dict(ck['sched'])
+        rows, start_epoch = ck['rows'], ck['epoch']
+        set_rng_state(ck['rng'])
+        print(f'Resuming from checkpoint after epoch {start_epoch}')
 
-    for epoch in range(args.epochs):
-        epoch_start = time.time()
+    log_path = os.path.join(out_dir, 'epochs.jsonl')
+    rewrite_jsonl(rows, log_path)
 
-        epoch_loss, n_batches = 0.0, 0
+    for epoch in range(start_epoch, epochs):
+        t0 = time.time()
+        lr = optimizer.param_groups[0]['lr']
+        loss_sum, n_batches = 0.0, 0
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
-            logits = model(x)
-            loss = criterion(logits, y)
+            loss = criterion(model(x), y)
             loss.backward()
             optimizer.step()
-            epoch_loss += loss.item()
+            loss_sum += loss.item()
             n_batches += 1
         scheduler.step()
 
-        train_acc = evaluate(model, train_loader, device)
+        tr_logits, tr_labels = predict(model, train_loader, device)
+        te_logits, te_labels = predict(model, test_loader, device)  # monitor only, never used to select
+        row = {
+            'epoch': epoch + 1, 'lr': lr, 'loss': loss_sum / n_batches,
+            'train_acc': float((tr_logits.argmax(1) == tr_labels).mean()),
+            'test_acc': float((te_logits.argmax(1) == te_labels).mean()),
+            'epoch_time_s': time.time() - t0,
+        }
+        rows.append(row)
+        with open(log_path, 'a') as f:
+            f.write(json.dumps(row) + '\n')
+        print(f'Epoch {epoch+1}/{epochs} | loss: {row["loss"]:.4f} | train_acc: {row["train_acc"]:.4f} | '
+              f'test_acc: {row["test_acc"]:.4f} | epoch_time: {format_duration(row["epoch_time_s"])} | '
+              f'elapsed: {format_duration(sum(r["epoch_time_s"] for r in rows))}')
 
-        epoch_time = time.time() - epoch_start
-        elapsed = time.time() - run_start
+        if (epoch + 1) % cfg.checkpoint.every == 0 or epoch + 1 == epochs:
+            save_atomic({'model': model.state_dict(), 'opt': optimizer.state_dict(),
+                         'sched': scheduler.state_dict(), 'rows': rows, 'epoch': epoch + 1,
+                         'rng': get_rng_state()}, ckpt_path)
 
-        print(f'Epoch {epoch + 1}/{args.epochs} | loss: {epoch_loss / n_batches:.4f} | '
-              f'train_acc: {train_acc:.4f} | '
-              f'epoch_time: {format_duration(epoch_time)} | elapsed: {format_duration(elapsed)}')
+    # ---- final evaluation of the last-epoch model on the held-out test set
+    logits, labels = predict(model, test_loader, device)
+    rep = classification_report(logits, labels, classes)
+    probs = softmax(logits.astype(np.float64))
 
-        history['loss'].append(epoch_loss / n_batches)
-        history['train_acc'].append(train_acc)
+    with open(os.path.join(out_dir, 'per_image.csv'), 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['path', 'true', 'pred', 'correct'] + [f'p_{c}' for c in classes])
+        for (path, _), t, p, pr in zip(test_set.samples, labels, probs.argmax(1), probs):
+            w.writerow([path, classes[t], classes[p], int(t == p)] + [f'{v:.6f}' for v in pr])
 
-    test_acc = evaluate(model, test_loader, device)
-    total_time = time.time() - run_start
-    avg_epoch_time = total_time / args.epochs
+    retrain_time = sum(r['epoch_time_s'] for r in rows)
+    search_summary = os.path.join(cfg.run.out_root, cli.name, 'search', 'summary.json')
+    search_time = None
+    if os.path.exists(search_summary) and cli.genotype_file is None:
+        with open(search_summary) as f:
+            search_time = json.load(f)['search_time_s']
 
-    print(f'\nFinal discretized-architecture, held-out test accuracy: {test_acc:.4f}')
-    print(f'(compare against supernet accuracy from train_search.py -- these are not the same measurement)')
-    print(f'Total retrain time: {format_duration(total_time)} '
-          f'(avg {format_duration(avg_epoch_time)}/epoch over {args.epochs} epochs)')
+    gd = genotype_to_dict(genotype)
+    rep.update({
+        'name': cli.name, 'seed': cfg.run.seed, 'genotype_file': geno_file,
+        'genotype': gd, 'normal': cell_stats(gd['normal']), 'reduce': cell_stats(gd['reduce']),
+        'parameters': n_params, 'flops_forward_1img': flops,
+        'retrain_epochs': epochs, 'retrain_time_s': retrain_time, 'search_time_s': search_time,
+        'data_info': data_info,
+    })
+    write_json(rep, metrics_path)
+    plot_retrain(rows, os.path.join(out_dir, 'retrain_curves.png'))
+    torch.save(model.state_dict(), os.path.join(out_dir, 'final_model.pt'))
 
-    plot_final_curves(history)
-
-    torch.save(model.state_dict(), 'checkpoints/final_model.pt')
-    print('Saved final model to checkpoints/final_model.pt')
+    print(f'\nTest accuracy {rep["accuracy"]:.4f} ({rep["errors"]} errors of {rep["n"]}) | '
+          f'macro-F1 {rep["macro_f1"]:.4f} | NLL {rep["nll"]:.4f}')
+    print('Per-class F1:', {c: round(v, 4) for c, v in zip(classes, rep['f1'])})
+    print(f'Parameters {n_params:,} | retrain time {format_duration(retrain_time)}')
+    print(f'Saved results in {out_dir}')
 
 
 if __name__ == '__main__':

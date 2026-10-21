@@ -1,0 +1,40 @@
+# Every setting a run depends on lives here. Nothing is hard-coded in the scripts.
+# Override on the command line, for example:
+#   python train_search.py --name seed1_e80 --seed 1 --set search.epochs=80
+# Only keys that exist in this file can be overridden (a typo is an error, not a silent no-op).
+
+run:
+  seed: 1                  # global seed for Python, NumPy, PyTorch (init, batch order, augmentation)
+  out_root: runs           # each run gets runs/<name>/ with search/ and retrain/ inside
+
+data:
+  root: data/NEU-CLS-final
+  batch_size: 16
+  arch_val_split: 0.5      # share of the train folder used as the architecture-validation half
+  split_seed: 42           # fixed split, kept identical across all seeds and all arms
+  num_workers: 0
+
+model:
+  C: 16
+  layers: 8
+
+search:
+  epochs: 50
+  w_lr: 0.025              # weight optimizer (SGD)
+  w_momentum: 0.9
+  w_weight_decay: 3.0e-4
+  arch_lr: 3.0e-4          # alpha optimizer (Adam), standard DARTS value
+  arch_betas: [0.5, 0.999]
+  arch_weight_decay: 1.0e-3
+
+retrain:
+  epochs: 50
+  C: 16
+  layers: 8
+  lr: 0.025
+  momentum: 0.9
+  weight_decay: 3.0e-4
+  batch_size: 16
+
+checkpoint:
+  every: 1                 # save a resumable checkpoint every N epochs (search and retrain)

@@ -23,12 +23,13 @@ import torch
 
 class Architect:
     def __init__(self, model, arch_lr=3e-4, arch_weight_decay=1e-3,
-                 unrolled_momentum=0.9, unrolled_weight_decay=3e-4):
+                 unrolled_momentum=0.9, unrolled_weight_decay=3e-4,
+                 arch_betas=(0.5, 0.999)):
         self.model = model
         self.optimizer = torch.optim.Adam(
             model.arch_parameters(),
             lr=arch_lr,
-            betas=(0.5, 0.999),
+            betas=tuple(arch_betas),
             weight_decay=arch_weight_decay,
         )
         # must match the weight optimizer's momentum/weight_decay for the
@@ -48,12 +49,12 @@ class Architect:
         logits = self.model(x_train)
         loss = criterion(logits, y_train)
 
-        theta = torch.cat([p.data.view(-1) for p in self.model.parameters()])
+        theta = torch.cat([p.data.view(-1) for p in self.model.weight_parameters()])
 
         try:
             moment = torch.cat([
                 w_optimizer.state[p].get('momentum_buffer', torch.zeros_like(p)).view(-1)
-                for p in self.model.parameters()
+                for p in self.model.weight_parameters()
             ])
             moment = moment.mul_(self.unrolled_momentum)
         except Exception:
@@ -62,8 +63,8 @@ class Architect:
         dtheta = torch.cat([
             (g + self.unrolled_weight_decay * p).view(-1)
             for g, p in zip(
-                torch.autograd.grad(loss, self.model.parameters()),
-                self.model.parameters(),
+                torch.autograd.grad(loss, self.model.weight_parameters()),
+                self.model.weight_parameters(),
             )
         ])
 
@@ -76,14 +77,20 @@ class Architect:
         model_dict = self.model.state_dict()
 
         params, offset = {}, 0
-        for name, p in self.model.named_parameters():
+        for name, p in self.model.weight_named_parameters():
             v_length = p.numel()
             params[name] = theta[offset: offset + v_length].view(p.size())
             offset += v_length
         assert offset == len(theta)
 
+        # only the weights are replaced; the alphas keep their current values
         model_dict.update(params)
         model_new.load_state_dict(model_dict)
+        # deepcopy also copies .grad, and the real model still holds the previous weight step's
+        # gradients; clear them so the unrolled backward pass starts from zero (as the original
+        # DARTS code does by building a fresh model).
+        for p in model_new.parameters():
+            p.grad = None
         return model_new.to(theta.device)
 
     def _backward_step_unrolled(self, x_train, y_train, x_val, y_val, eta, w_optimizer, criterion):
@@ -94,7 +101,7 @@ class Architect:
         unrolled_loss.backward()
 
         dalpha = [v.grad.data for v in unrolled_model.arch_parameters()]
-        dtheta = [v.grad.data for v in unrolled_model.parameters()]
+        dtheta = [v.grad.data for v in unrolled_model.weight_parameters()]
 
         implicit_grads = self._hessian_vector_product(dtheta, x_train, y_train, criterion)
 
@@ -116,17 +123,18 @@ class Architect:
     def _hessian_vector_product(self, vector, x_train, y_train, criterion, r=1e-2):
         R = r / torch.cat([v.view(-1) for v in vector]).norm()
 
-        for p, v in zip(self.model.parameters(), vector):
+        weights = self.model.weight_parameters()
+        for p, v in zip(weights, vector):
             p.data.add_(v, alpha=R)
         loss = criterion(self.model(x_train), y_train)
         grads_p = torch.autograd.grad(loss, self.model.arch_parameters())
 
-        for p, v in zip(self.model.parameters(), vector):
+        for p, v in zip(weights, vector):
             p.data.sub_(v, alpha=2 * R)
         loss = criterion(self.model(x_train), y_train)
         grads_n = torch.autograd.grad(loss, self.model.arch_parameters())
 
-        for p, v in zip(self.model.parameters(), vector):
+        for p, v in zip(weights, vector):
             p.data.add_(v, alpha=R)  # restore original weights
 
         return [(p - n).div_(2 * R) for p, n in zip(grads_p, grads_n)]

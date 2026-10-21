@@ -23,6 +23,7 @@ free-tier T4). This is a deliberate resolution/compute tradeoff, not
 an oversight -- document it as such in the methodology chapter.
 """
 
+import numpy as np
 import torch
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, random_split
@@ -57,7 +58,7 @@ def get_transforms():
     return train_transform, eval_transform
 
 
-def get_neu_cls_loaders(data_root, batch_size=32, val_split_for_arch=0.5, num_workers=0):
+def get_neu_cls_loaders(data_root, batch_size=32, val_split_for_arch=0.5, num_workers=0, split_seed=42):
     """
     data_root: path to the NEU-CLS folder, e.g. 'data/NEU-CLS-final'
                (expects data_root/train/images/<class>/*.bmp and
@@ -81,11 +82,33 @@ def get_neu_cls_loaders(data_root, batch_size=32, val_split_for_arch=0.5, num_wo
     n_arch_val = int(n_total * val_split_for_arch)
     n_train = n_total - n_arch_val
 
-    generator = torch.Generator().manual_seed(42)  # reproducible split
+    generator = torch.Generator().manual_seed(split_seed)  # reproducible split, independent of the run seed
     train_subset, arch_val_subset = random_split(full_train, [n_train, n_arch_val], generator=generator)
 
     train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
     arch_val_loader = DataLoader(arch_val_subset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
-    return train_loader, arch_val_loader, test_loader, full_train.classes
+    classes = full_train.classes
+    targets = np.array(full_train.targets)
+    info = {
+        'classes': classes,
+        'search_train_counts': np.bincount(targets[train_subset.indices], minlength=len(classes)).tolist(),
+        'arch_val_counts': np.bincount(targets[arch_val_subset.indices], minlength=len(classes)).tolist(),
+        'test_counts': np.bincount(test_set.targets, minlength=len(classes)).tolist(),
+    }
+    return train_loader, arch_val_loader, test_loader, classes, info
+
+
+def get_retrain_loaders(data_root, batch_size=16, num_workers=0):
+    """Final retrain: the whole train folder, no search split. Returns train_loader, test_loader, classes, test_set, info."""
+    train_transform, eval_transform = get_transforms()
+    full_train = datasets.ImageFolder(root=f'{data_root}/train/images', transform=train_transform)
+    test_set = datasets.ImageFolder(root=f'{data_root}/validation/images', transform=eval_transform)
+    classes = full_train.classes
+    info = {'classes': classes,
+            'retrain_counts': np.bincount(full_train.targets, minlength=len(classes)).tolist(),
+            'test_counts': np.bincount(test_set.targets, minlength=len(classes)).tolist()}
+    train_loader = DataLoader(full_train, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    return train_loader, test_loader, classes, test_set, info
